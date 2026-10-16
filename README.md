@@ -1,4 +1,4 @@
---- V.8.6.28 FlowAuth Config Bridge + AutoStart
+--- V.8.7.0 ABA Smart Server Browser Balancer
 repeat task.wait(0.1) until game:IsLoaded()
 
 local TeleportService = game:GetService("TeleportService")
@@ -107,20 +107,18 @@ end
 local myName = LP.Name
 
 -- ===== Robust external config bridge =====
--- FlowAuth may execute this BODY in a different _G environment.
--- WWHubConfig is therefore the preferred bridge from the readable loader.
+-- Priority:
+--   1) Fresh _G values visible to this BODY
+--   2) Explicit getgenv().WWHubConfig written by the loader
+--   3) Legacy getgenv().main/afk fallback
+-- This prevents stale getgenv() values from overriding a newly-run loader.
 local ENV=(getgenv and getgenv()) or _G
 local BRIDGE=(type(ENV.WWHubConfig)=="table" and ENV.WWHubConfig) or {}
 
 local function normalizeList(value)
 	local out={}
 
-	-- Compact config:
-	-- _G.main = "Username"
-	-- _G.afk  = "Username"
 	if type(value)=="string" then
-		-- Supports one name: "User1"
-		-- or compact multiple names: "User1,User2,User3"
 		for part in string.gmatch(value,"[^,]+") do
 			local s=part:gsub("^%s+",""):gsub("%s+$","")
 			if s~="" then table.insert(out,s) end
@@ -128,8 +126,6 @@ local function normalizeList(value)
 		return out
 	end
 
-	-- Multi-account config still supported:
-	-- _G.main = {"User1","User2"}
 	if type(value)=="table" then
 		for _,v in ipairs(value) do
 			if type(v)=="string" then
@@ -138,19 +134,40 @@ local function normalizeList(value)
 			end
 		end
 	end
+
 	return out
 end
 
-local mainCfg=normalizeList(
-	BRIDGE.main
-	or ENV.main
-	or (_G and _G.main)
+local function usableListValue(v)
+	if type(v)=="string" then
+		return v:gsub("%s+","")~=""
+	end
+	if type(v)=="table" then
+		return next(v)~=nil
+	end
+	return false
+end
+
+local function chooseConfigValue(localValue,bridgeValue,envValue)
+	if usableListValue(localValue) then return localValue,"_G" end
+	if usableListValue(bridgeValue) then return bridgeValue,"WWHubConfig" end
+	if usableListValue(envValue) then return envValue,"getgenv" end
+	return nil,"EMPTY"
+end
+
+local rawMain,mainSource=chooseConfigValue(
+	_G and _G.main,
+	BRIDGE.main,
+	ENV.main
 )
-local afkCfg=normalizeList(
-	BRIDGE.afk
-	or ENV.afk
-	or (_G and _G.afk)
+local rawAfk,afkSource=chooseConfigValue(
+	_G and _G.afk,
+	BRIDGE.afk,
+	ENV.afk
 )
+
+local mainCfg=normalizeList(rawMain)
+local afkCfg=normalizeList(rawAfk)
 
 _G.main=mainCfg
 _G.afk=afkCfg
@@ -160,45 +177,48 @@ BRIDGE.main=mainCfg
 BRIDGE.afk=afkCfg
 ENV.WWHubConfig=BRIDGE
 
-local externalCap=tonumber(
-	BRIDGE.pointcap
-	or ENV.pointcap
-	or (_G and _G.pointcap)
-) or 1000
+local function chooseScalar(localValue,bridgeValue,envValue,defaultValue)
+	if localValue~=nil then return localValue end
+	if bridgeValue~=nil then return bridgeValue end
+	if envValue~=nil then return envValue end
+	return defaultValue
+end
+
+local externalCap=tonumber(chooseScalar(
+	_G and _G.pointcap,
+	BRIDGE.pointcap,
+	ENV.pointcap,
+	1000
+)) or 1000
 _G.pointcap=externalCap
 ENV.pointcap=externalCap
 BRIDGE.pointcap=externalCap
 
-local externalFpsCap=math.max(1,math.floor(tonumber(
-	BRIDGE.fpscap
-	or ENV.fpscap
-	or (_G and _G.fpscap)
-) or 20))
+local externalFpsCap=math.max(1,math.floor(tonumber(chooseScalar(
+	_G and _G.fpscap,
+	BRIDGE.fpscap,
+	ENV.fpscap,
+	20
+)) or 20))
 _G.fpscap=externalFpsCap
 ENV.fpscap=externalFpsCap
 BRIDGE.fpscap=externalFpsCap
 
-local antiAfkJumpSec=math.max(60,math.floor(tonumber(
-	BRIDGE.antiAfkJumpSec
-	or ENV.antiAfkJumpSec
-	or (_G and _G.antiAfkJumpSec)
-) or 300))
+local antiAfkJumpSec=math.max(60,math.floor(tonumber(chooseScalar(
+	_G and _G.antiAfkJumpSec,
+	BRIDGE.antiAfkJumpSec,
+	ENV.antiAfkJumpSec,
+	300
+)) or 300))
 _G.antiAfkJumpSec=antiAfkJumpSec
 ENV.antiAfkJumpSec=antiAfkJumpSec
 BRIDGE.antiAfkJumpSec=antiAfkJumpSec
 
-local serverHopCheckSec=math.max(60,math.floor(tonumber(
-	BRIDGE.serverHopCheckSec
-	or ENV.serverHopCheckSec
-	or (_G and _G.serverHopCheckSec)
-) or 600))
-_G.serverHopCheckSec=serverHopCheckSec
-ENV.serverHopCheckSec=serverHopCheckSec
-BRIDGE.serverHopCheckSec=serverHopCheckSec
-
 pcall(function()
 	if setfpscap then setfpscap(externalFpsCap) end
 end)
+
+warn("[WWHub] Config source MAIN="..tostring(mainSource).." AFK="..tostring(afkSource))
 
 local function sameUser(a,b)
 	a=tostring(a or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
@@ -226,8 +246,12 @@ local autoStartAttempts=0
 warn("[WWHub] User: "..tostring(myName))
 warn("[WWHub] Role: "..FARM_ROLE)
 warn("[WWHub] Main count: "..tostring(#_G.main))
+warn("[WWHub] AFK count: "..tostring(#_G.afk))
 warn("[WWHub] Main config: "..table.concat(_G.main,", "))
 warn("[WWHub] AFK config: "..table.concat(_G.afk,", "))
+if not IS_FARMER then
+	warn("[WWHub] UNLISTED diagnostic: local username did not match any loaded MAIN/AFK entry")
+end
 
 -- ===== Scoped Bakugou-Q workspace.Explosion remover =====
 -- Do not delete every workspace.Explosion globally because other ABA FX modules may use it.
@@ -625,153 +649,519 @@ table.insert(cloakConnections,workspace.DescendantAdded:Connect(function(obj)
 	end
 end))
 
--- ===== MAIN Pair Server Hop =====
--- Rules:
--- 1) Only MAIN accounts participate.
--- 2) If the configured MAIN list contains only one unique username, hopping is disabled.
--- 3) Every serverHopCheckSec (default 600s), count configured MAIN accounts in this server.
--- 4) 2+ configured MAIN accounts present = stay.
--- 5) Exactly 1 configured MAIN present = hop to another public server.
--- After teleport, use your executor's Auto Execute on Teleport/Hop if you want this loader to run again.
+-- ===== ABA Smart Server Browser Balancer =====
+-- Uses ABA's own ReplicatedStorage.Servers + ServerTP.
+--
+-- Goals:
+--   * MAIN accounts keep farming while the balancer works in background.
+--   * Prefer joinable Special servers whose Mode contains "FFA".
+--   * Spread active MAIN accounts in balanced groups of 2-4.
+--   * If Special FFA capacity is genuinely insufficient, add "Kills Team" servers.
+--   * Missing/offline MAIN accounts are removed from the active plan after a TTL.
+--   * When an account returns, all clients deterministically rebalance again.
+--   * Never blind-hop when server data is unavailable.
+--
+-- No shared JSON/coordinator is required: ABA's Server Browser already replicates
+-- JobIds and player UserIds to every client.
 
-local serverHopBusy=false
-local lastHopCheckText="HOP: WAIT"
+local SMART_SCAN_INTERVAL=15
+local SMART_ACTIVE_TTL=45
+local SMART_DISCOVERY_WAIT=12
+local SMART_MOVE_COOLDOWN=45
+local SMART_STABLE_CHECKS=2
+local SMART_MAX_GROUP_SIZE=4
 
-local function uniqueMainCount()
+local ServersFolder=ReplicatedStorage:FindFirstChild("Servers")
+local ServerTP=ReplicatedStorage:FindFirstChild("ServerTP")
+local StaffServerList=ReplicatedStorage:FindFirstChild("StaffServerList")
+
+local smartServerText="SMART: STARTING"
+local smartMoveBusy=false
+local smartPendingJob=nil
+local smartPendingChecks=0
+local smartPlanSerial=0
+local smartResolvedCount=0
+
+local smartMainNames={}
+local smartMainCount=0
+local smartNameByKey={}
+local smartIdByKey={}
+local smartKeyById={}
+local smartLastSeen={}
+
+local function smartKey(name)
+	return tostring(name or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+end
+
+do
 	local seen={}
-	local count=0
 	for _,name in ipairs(_G.main) do
-		local key=tostring(name or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+		local key=smartKey(name)
 		if key~="" and not seen[key] then
 			seen[key]=true
-			count+=1
+			smartMainCount+=1
+			smartMainNames[smartMainCount]=tostring(name)
+			smartNameByKey[key]=tostring(name)
 		end
 	end
-	return count
 end
 
-local function mainPresentCount()
-	local count=0
-	for _,plr in ipairs(Players:GetPlayers()) do
-		for _,name in ipairs(_G.main) do
-			if sameUser(plr.Name,name) then
-				count+=1
-				break
-			end
-		end
+local mySmartKey=smartKey(myName)
+
+local function requestServerBrowserWatch()
+	if StaffServerList and StaffServerList:IsA("RemoteFunction") then
+		task.spawn(function()
+			pcall(function()
+				StaffServerList:InvokeServer("watch")
+			end)
+		end)
 	end
-	return count
 end
 
-local function findPublicServer()
-	local cursor=nil
+local function resolveMainUserId(name)
+	local key=smartKey(name)
+	if key=="" or smartIdByKey[key] then return end
 
-	-- Ascending population makes separate lonely MAIN accounts tend to choose
-	-- the same target server instead of selecting randomly.
+	if sameUser(name,myName) then
+		smartIdByKey[key]=LP.UserId
+		smartKeyById[LP.UserId]=key
+		smartResolvedCount+=1
+		return
+	end
+
 	for _=1,3 do
-		local url=("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"):format(MAIN_PLACE_ID)
-		if cursor and cursor~="" then
-			url=url.."&cursor="..cursor
-		end
-
-		local ok,data=pcall(function()
-			return Http:JSONDecode(game:HttpGet(url))
+		local ok,userId=pcall(function()
+			return Players:GetUserIdFromNameAsync(name)
 		end)
-		if not ok or type(data)~="table" then
-			return nil,"server API failed"
+		if ok and tonumber(userId) then
+			userId=tonumber(userId)
+			smartIdByKey[key]=userId
+			smartKeyById[userId]=key
+			smartResolvedCount+=1
+			return
 		end
-
-		for _,server in ipairs(data.data or {}) do
-			local id=tostring(server.id or "")
-			local playing=tonumber(server.playing) or 0
-			local maxPlayers=tonumber(server.maxPlayers) or 0
-
-			if id~="" and id~=game.JobId and (maxPlayers<=0 or playing<maxPlayers) then
-				return id,nil
-			end
-		end
-
-		cursor=data.nextPageCursor
-		if not cursor or cursor=="" then break end
+		task.wait(1)
 	end
-
-	return nil,"no public target"
 end
 
-local function hopForMainPair()
-	if serverHopBusy then return false end
-	serverHopBusy=true
+for i=1,smartMainCount do
+	local name=smartMainNames[i]
+	task.spawn(resolveMainUserId,name)
+end
 
-	local total=uniqueMainCount()
-	local present=mainPresentCount()
-	lastHopCheckText=("MAIN %d/%d"):format(present,total)
+local SMART_HOP_FILE="WWHub_smart_hop_"..tostring(LP.UserId)..".txt"
+local smartLastMoveEpoch=0
 
-	if not IS_MAIN or total<=1 or present>=2 then
-		serverHopBusy=false
-		return false
+pcall(function()
+	if type(readfile)=="function" and isfile and isfile(SMART_HOP_FILE) then
+		smartLastMoveEpoch=tonumber(readfile(SMART_HOP_FILE)) or 0
 	end
+end)
 
-	notifyAction(
-		"Server Hop",
-		("MAIN alone (%d/%d) • finding another public server"):format(present,total),
-		5
-	)
-
-	local serverId,err=findPublicServer()
-	if serverId then
-		warn("[WWHub] Hop target: "..serverId)
-		local ok,tpErr=pcall(function()
-			TeleportService:TeleportToPlaceInstance(MAIN_PLACE_ID,serverId,LP)
-		end)
-		if not ok then
-			warn("[WWHub] TeleportToPlaceInstance failed: "..tostring(tpErr))
+local function saveSmartMoveTime()
+	smartLastMoveEpoch=os.time()
+	pcall(function()
+		if type(writefile)=="function" then
+			writefile(SMART_HOP_FILE,tostring(smartLastMoveEpoch))
 		end
-	else
-		warn("[WWHub] Public server lookup failed: "..tostring(err).." | fallback random public")
-		pcall(function()
-			TeleportService:Teleport(MAIN_PLACE_ID,LP)
-		end)
+	end)
+end
+
+local function currentBrowserJobId()
+	return tostring(workspace:GetAttribute("ServerBrowserJobId") or game.JobId or "")
+end
+
+local function readServerFolder(folder)
+	if not folder or not folder:IsA("Folder") then return nil end
+
+	local attrs=folder:GetAttributes()
+	local users={}
+	local userCount=0
+	local listedCount=0
+
+	for _,child in ipairs(folder:GetChildren()) do
+		local uid=tonumber(child.Name)
+		if uid then
+			userCount+=1
+			users[userCount]=uid
+			if smartKeyById[uid] then
+				listedCount+=1
+				smartLastSeen[smartKeyById[uid]]=os.clock()
+			end
+		end
 	end
 
-	-- If teleport fails and this instance is still alive, allow a future retry.
-	task.delay(15,function()
-		serverHopBusy=false
-	end)
+	local playerCount=tonumber(attrs.PlayerCount) or userCount
+	local maxPlayers=tonumber(attrs.MaxPlayers) or 16
+	if maxPlayers<1 then maxPlayers=16 end
+
+	local outsiderCount=math.max(0,playerCount-listedCount)
+	local botCapacity=math.max(0,maxPlayers-outsiderCount)
+
+	return {
+		JobId=tostring(folder.Name),
+		Type=tostring(attrs.Type or ""),
+		Mode=tostring(attrs.Mode or ""),
+		Map=tostring(attrs.Map or ""),
+		Region=tostring(attrs.ServerRegion or ""),
+		PlayerCount=playerCount,
+		MaxPlayers=maxPlayers,
+		ListedCount=listedCount,
+		OutsiderCount=outsiderCount,
+		BotCapacity=botCapacity,
+		Users=users
+	}
+end
+
+local function scanServerBrowser()
+	local ffa={}
+	local killsTeam={}
+	local ffaCount=0
+	local teamCount=0
+
+	if not ServersFolder or not ServersFolder.Parent then
+		ServersFolder=ReplicatedStorage:FindFirstChild("Servers")
+	end
+	if not ServerTP or not ServerTP.Parent then
+		ServerTP=ReplicatedStorage:FindFirstChild("ServerTP")
+	end
+	if not ServersFolder then
+		return ffa,ffaCount,killsTeam,teamCount
+	end
+
+	for _,folder in ipairs(ServersFolder:GetChildren()) do
+		local data=readServerFolder(folder)
+		if data then
+			local typeLower=data.Type:lower()
+			local modeLower=data.Mode:lower()
+			local joinable=(data.JobId==currentBrowserJobId()) or data.PlayerCount<data.MaxPlayers
+
+			if typeLower=="special" and joinable and data.BotCapacity>=2 then
+				if modeLower:find("ffa",1,true) then
+					ffaCount+=1
+					ffa[ffaCount]=data
+				elseif modeLower:find("kills team",1,true) or modeLower:find("kill team",1,true) then
+					teamCount+=1
+					killsTeam[teamCount]=data
+				end
+			end
+		end
+	end
+
+	local function better(a,b)
+		-- Keep servers already containing our MAIN accounts whenever possible.
+		if a.ListedCount~=b.ListedCount then
+			return a.ListedCount>b.ListedCount
+		end
+		-- Then prefer fewer outsiders / lower population.
+		if a.OutsiderCount~=b.OutsiderCount then
+			return a.OutsiderCount<b.OutsiderCount
+		end
+		if a.PlayerCount~=b.PlayerCount then
+			return a.PlayerCount<b.PlayerCount
+		end
+		return a.JobId<b.JobId
+	end
+
+	table.sort(ffa,better)
+	table.sort(killsTeam,better)
+
+	return ffa,ffaCount,killsTeam,teamCount
+end
+
+local function activeMainKeys()
+	local now=os.clock()
+	local active={}
+	local activeCount=0
+
+	-- Current client is always active.
+	smartLastSeen[mySmartKey]=now
+
+	-- Also touch MAIN accounts that are directly visible in this server by name.
+	for _,plr in ipairs(Players:GetPlayers()) do
+		local key=smartKey(plr.Name)
+		if smartNameByKey[key] then
+			smartLastSeen[key]=now
+		end
+	end
+
+	for i=1,smartMainCount do
+		local name=smartMainNames[i]
+		local key=smartKey(name)
+		local seenAt=smartLastSeen[key]
+
+		if key==mySmartKey or (seenAt and now-seenAt<=SMART_ACTIVE_TTL) then
+			activeCount+=1
+			active[activeCount]=key
+		end
+	end
+
+	return active,activeCount
+end
+
+local function addSelected(selected,selectedSet,server)
+	if not server or selectedSet[server.JobId] then return false end
+	selectedSet[server.JobId]=true
+	server.Assigned=0
+	server.AssignCapacity=math.max(2,math.min(SMART_MAX_GROUP_SIZE,server.BotCapacity))
+	selected[selected.count+1]=server
+	selected.count+=1
 	return true
 end
 
-task.spawn(function()
-	local total=uniqueMainCount()
+local function totalSelectedCapacity(selected)
+	local total=0
+	for i=1,selected.count do
+		total+=tonumber(selected[i].AssignCapacity) or 0
+	end
+	return total
+end
 
-	if not IS_MAIN then
-		lastHopCheckText="HOP: NOT MAIN"
-		return
+local function makeSmartPlan()
+	requestServerBrowserWatch()
+
+	local ffa,ffaCount,killsTeam,teamCount=scanServerBrowser()
+	local active,activeCount=activeMainKeys()
+
+	if activeCount<=0 then
+		return nil,{
+			reason="NO ACTIVE MAIN",
+			activeCount=activeCount,
+			ffaCount=ffaCount,
+			teamCount=teamCount
+		}
 	end
 
-	if total<=1 then
-		lastHopCheckText="HOP: OFF (1 MAIN)"
-		warn("[WWHub] Main-pair hop disabled: only one MAIN configured")
-		return
+	if activeCount==1 then
+		-- Nothing useful to merge with. Keep farming current server; do not blind-hop.
+		return nil,{
+			reason="SOLO KEEP FARMING",
+			activeCount=activeCount,
+			ffaCount=ffaCount,
+			teamCount=teamCount
+		}
 	end
 
-	warn(("[WWHub] Main-pair hop enabled | check every %ds | configured MAIN=%d"):format(serverHopCheckSec,total))
+	local idealGroups=math.max(1,math.floor(activeCount/2))
+	local minGroups=math.max(1,math.ceil(activeCount/SMART_MAX_GROUP_SIZE))
 
-	while task.wait(serverHopCheckSec) do
-		if not gui or not gui.Parent then break end
+	local selected={count=0}
+	local selectedSet={}
 
-		local present=mainPresentCount()
-		total=uniqueMainCount()
-		lastHopCheckText=("MAIN %d/%d"):format(present,total)
-
-		if total<=1 then
-			lastHopCheckText="HOP: OFF (1 MAIN)"
-			break
-		elseif present>=2 then
-			warn(("[WWHub] Hop check: MAIN %d/%d present -> stay"):format(present,total))
-		else
-			warn(("[WWHub] Hop check: MAIN %d/%d present -> hop"):format(present,total))
-			hopForMainPair()
+	if ffaCount>0 then
+		local desiredFFA=math.min(idealGroups,ffaCount)
+		for i=1,desiredFFA do
+			addSelected(selected,selectedSet,ffa[i])
 		end
+
+		-- Only use Kills Team when FFA alone cannot provide enough 2-4 player groups.
+		local j=1
+		while selected.count<minGroups and j<=teamCount do
+			addSelected(selected,selectedSet,killsTeam[j])
+			j+=1
+		end
+
+		-- Capacity check: if selected FFA servers are too crowded, add spare FFA,
+		-- then Kills Team, but never exceed the ideal number of groups.
+		local extraFFA=desiredFFA+1
+		while totalSelectedCapacity(selected)<activeCount and selected.count<idealGroups and extraFFA<=ffaCount do
+			addSelected(selected,selectedSet,ffa[extraFFA])
+			extraFFA+=1
+		end
+		while totalSelectedCapacity(selected)<activeCount and selected.count<idealGroups and j<=teamCount do
+			addSelected(selected,selectedSet,killsTeam[j])
+			j+=1
+		end
+	else
+		-- No Special FFA visible: Kills Team is the fallback.
+		local desiredTeam=math.min(idealGroups,teamCount)
+		for i=1,desiredTeam do
+			addSelected(selected,selectedSet,killsTeam[i])
+		end
+	end
+
+	if selected.count<=0 then
+		return nil,{
+			reason="NO SPECIAL FFA/KILLS TEAM",
+			activeCount=activeCount,
+			ffaCount=ffaCount,
+			teamCount=teamCount
+		}
+	end
+
+	-- Stable server ordering makes every Roblox instance compute the same mapping.
+	table.sort(selected,function(a,b)
+		return a.JobId<b.JobId
+	end)
+
+	local targetByKey={}
+	local groupSizeByJob={}
+	local assignedCount=0
+	local cursor=1
+
+	-- Round-robin keeps group sizes balanced while respecting per-server capacity.
+	for i=1,activeCount do
+		local key=active[i]
+		local placed=false
+		local tries=0
+
+		while tries<selected.count do
+			local server=selected[cursor]
+			if server.Assigned<server.AssignCapacity then
+				server.Assigned+=1
+				targetByKey[key]=server
+				groupSizeByJob[server.JobId]=server.Assigned
+				assignedCount+=1
+				placed=true
+				cursor=(cursor%selected.count)+1
+				break
+			end
+
+			cursor=(cursor%selected.count)+1
+			tries+=1
+		end
+
+		if not placed then
+			-- No safe 2-4 slot remains. This account simply keeps farming its
+			-- current server until the browser shows enough capacity.
+			targetByKey[key]=nil
+		end
+	end
+
+	smartPlanSerial+=1
+
+	return targetByKey,{
+		reason="OK",
+		activeCount=activeCount,
+		configuredCount=smartMainCount,
+		ffaCount=ffaCount,
+		teamCount=teamCount,
+		selectedCount=selected.count,
+		assignedCount=assignedCount,
+		groupSizeByJob=groupSizeByJob,
+		serial=smartPlanSerial
+	}
+end
+
+local function smartCanMove()
+	return (os.time()-smartLastMoveEpoch)>=SMART_MOVE_COOLDOWN
+end
+
+local function smartMoveTo(server,meta)
+	if not server or not ServerTP then return false end
+	if smartMoveBusy then return false end
+	if server.JobId==currentBrowserJobId() then return false end
+	if not smartCanMove() then return false end
+
+	smartMoveBusy=true
+	saveSmartMoveTime()
+
+	local groupSize=(meta.groupSizeByJob and meta.groupSizeByJob[server.JobId]) or server.Assigned or 0
+	local modeLabel=server.Mode~="" and server.Mode or "Special"
+
+	notifyAction(
+		"Smart Server",
+		("Move -> %s | group %d | %d/%d"):format(
+			modeLabel,
+			groupSize,
+			meta.activeCount or 0,
+			meta.configuredCount or smartMainCount
+		),
+		5
+	)
+
+	warn(("[WWHub] Smart ServerTP -> %s | %s | group=%d"):format(
+		server.JobId,
+		modeLabel,
+		groupSize
+	))
+
+	local ok,err=pcall(function()
+		ServerTP:FireServer(server.JobId)
+	end)
+	if not ok then
+		warn("[WWHub] ServerTP failed: "..tostring(err))
+	end
+
+	task.delay(12,function()
+		smartMoveBusy=false
+	end)
+
+	return ok
+end
+
+task.spawn(function()
+	if not IS_MAIN then
+		smartServerText="SMART: MAIN ONLY"
+		return
+	end
+
+	if smartMainCount<=1 then
+		smartServerText="SMART: OFF (1 MAIN)"
+		return
+	end
+
+	requestServerBrowserWatch()
+
+	-- Let ABA populate ReplicatedStorage.Servers and resolve configured usernames.
+	task.wait(SMART_DISCOVERY_WAIT)
+
+	while LP and LP.Parent do
+		requestServerBrowserWatch()
+
+		-- scanServerBrowser touches lastSeen before activeMainKeys() is evaluated.
+		local plan,meta=makeSmartPlan()
+		local target=plan and plan[mySmartKey] or nil
+
+		if not target then
+			smartPendingJob=nil
+			smartPendingChecks=0
+			smartServerText=("SMART: %s | %d/%d | FFA:%d TEAM:%d"):format(
+				tostring(meta.reason or "WAIT"),
+				tonumber(meta.activeCount) or 0,
+				smartMainCount,
+				tonumber(meta.ffaCount) or 0,
+				tonumber(meta.teamCount) or 0
+			)
+		else
+			local current=currentBrowserJobId()
+			local groupSize=(meta.groupSizeByJob and meta.groupSizeByJob[target.JobId]) or target.Assigned or 0
+			local shortMode=target.Mode:lower():find("ffa",1,true) and "FFA" or "TEAM"
+
+			if target.JobId==current then
+				smartPendingJob=nil
+				smartPendingChecks=0
+				smartServerText=("SMART: %s G%d | %d/%d | BALANCED"):format(
+					shortMode,
+					groupSize,
+					meta.activeCount or 0,
+					smartMainCount
+				)
+			else
+				if smartPendingJob==target.JobId then
+					smartPendingChecks+=1
+				else
+					smartPendingJob=target.JobId
+					smartPendingChecks=1
+				end
+
+				local cooldownLeft=math.max(0,SMART_MOVE_COOLDOWN-(os.time()-smartLastMoveEpoch))
+				smartServerText=("SMART: %s G%d | %d/%d | MOVE %d/%d"):format(
+					shortMode,
+					groupSize,
+					meta.activeCount or 0,
+					smartMainCount,
+					smartPendingChecks,
+					SMART_STABLE_CHECKS
+				)
+
+				if smartPendingChecks>=SMART_STABLE_CHECKS and cooldownLeft<=0 then
+					smartMoveTo(target,meta)
+				end
+			end
+		end
+
+		task.wait(SMART_SCAN_INTERVAL)
 	end
 end)
 
@@ -1796,7 +2186,7 @@ end)
 
 -- ===== GUI =====
 gui=Instance.new("ScreenGui")
-gui.Name="WWHub_GUI_v8_6_28"
+gui.Name="WWHub_GUI_v8_7_0"
 gui.ResetOnSpawn=false
 gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
 gui.DisplayOrder=1000000
@@ -1858,7 +2248,7 @@ local titleLbl=Instance.new("TextLabel")
 titleLbl.Size=UDim2.new(1,-50,1,0)
 titleLbl.Position=UDim2.new(0,12,0,0)
 titleLbl.BackgroundTransparency=1
-titleLbl.Text="⚡ WW Hub v8.6.28"
+titleLbl.Text="⚡ WW Hub v8.7.0"
 titleLbl.TextColor3=Color3.fromRGB(155,80,255)
 titleLbl.TextSize=18
 titleLbl.Font=Enum.Font.GothamBold
@@ -2143,8 +2533,8 @@ task.spawn(function()
 		local gold=getGold()
 		local prestige=getPrestigeCount()
 		local info=" | t="..tostring(timer)
-		if IS_MAIN and uniqueMainCount()>1 then
-			info=info.." | "..tostring(lastHopCheckText)
+		if IS_MAIN and smartMainCount>1 then
+			info=info.." | "..tostring(smartServerText)
 		end
 		local gained,elapsed=getFarmProgress()
 		local sign=gained>=0 and "+" or ""
@@ -2168,7 +2558,10 @@ task.spawn(function()
 			startBtn.BackgroundColor3=Color3.fromRGB(40,190,100)
 			startBtn.Text="⏸ RUNNING"
 		elseif not IS_FARMER then
-			setStatus("FARM: IDLE  |  UNLISTED  |  PRESS START",Color3.fromRGB(255,120,120))
+			setStatus(
+				"FARM: IDLE | UNLISTED @"..tostring(myName).." | MAIN LIST: "..tostring(#_G.main),
+				Color3.fromRGB(255,120,120)
+			)
 		else
 			setStatus("FARM: IDLE  |  ROLE: "..FARM_ROLE.."  |  AUTO READY",Color3.fromRGB(150,175,220))
 		end
